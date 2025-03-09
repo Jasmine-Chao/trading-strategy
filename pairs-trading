@@ -1,0 +1,155 @@
+import numpy as np
+import pandas as pd
+from scipy.stats import linregress
+import matplotlib
+matplotlib.use('QtAgg')
+import matplotlib.pyplot as plt  #更改matplotlib後端，將後端切換到QtAgg以避免顯示錯誤，確保安裝tcl
+#pip install  openpyxl statsmodels numpy pandas matplotlib
+
+#檢測tcl問題是否被排除
+import tkinter
+print(tkinter.TkVersion)  # 應該返回 Tcl/Tk 的版本號
+
+##
+# 1.從 Excel 檔案讀取資料
+file_path =r'D:\重要資料\TMBA\加密貨幣交易\AI\day_2022_4.xlsx'
+df = pd.read_excel(file_path)
+#
+print(df.head(3))
+
+# 確保開盤價格存在
+if 'PHA_open' not in df.columns or 'FET_open' not in df.columns:
+    raise ValueError("Excel 檔案中必須包含 'LIT_open' 和 'BTC_open' 欄位")
+
+# 確認資料型態是否為數值
+print(df.dtypes)
+
+# 計算價差比值
+df['spread'] = df['PHA_close'] / df['FET_close']
+spread = df['spread'].values  # 確保 spread 是一個陣列
+
+# 检查 NaN 和 Inf 值
+print("NaN values in spread:", np.isnan(spread).sum())
+print("Inf values in spread:", np.isinf(spread).sum())
+
+
+# 移除 NaN 和 Inf
+spread = spread[~np.isnan(spread)]
+spread = spread[~np.isinf(spread)]
+
+
+##對比值進行單根檢定
+from statsmodels.tsa.stattools import adfuller       #記得要先安裝statsmodels的套件模組
+def rolling_adf(series, window_size):
+    adf_stats = []
+    p_values = []
+
+    for start in range(len(series) - window_size + 1):
+        #當前窗口數據
+        window = series[start:start + window_size]
+
+        result = adfuller(window)
+        adf_stats.append(result[0])  # ADF 統計量
+        p_values.append(result[1])  # p-value
+
+    return pd.Series(adf_stats), pd.Series(p_values)
+
+window_size = 100  
+spread = df['spread']
+
+#滑動窗口執行ADF
+adf_stats, p_values = rolling_adf(spread, window_size)
+
+# 儲存結果和原始數據
+df['adf_stats'] = pd.Series([np.nan] * (window_size - 1) + list(adf_stats))
+df['p_values'] = pd.Series([np.nan] * (window_size - 1) + list(p_values))
+
+
+#資料視覺化
+plt.figure(figsize=(12, 6))
+# 原始 spread 時間序列
+plt.subplot(2, 1, 1)
+plt.plot(df['spread'], label='Spread')
+plt.title('Spread Time Series')
+plt.xlabel('Time')
+plt.ylabel('Spread')
+plt.legend()
+
+#窗口ADF檢定結果
+plt.subplot(2, 1, 2)
+plt.plot(df['p_values'], label='P-Value', color='red')
+plt.axhline(0.05, color='green', linestyle='--', label='Significance Level (0.05)')
+plt.title('ADF P-Value Over Rolling Window')
+plt.xlabel('Time')
+plt.ylabel('P-Value')
+plt.legend()
+
+plt.tight_layout()
+plt.show()
+
+
+
+
+
+
+# 2.由OU模型估計參數(估計隨機過程的均值回歸參數)
+def estimate_ou_params(spread):
+    """OU模型參數：均值回歸速率θ、均值μ、標準差σ"""
+    delta_spread = np.diff(spread)  #計算spread的一階差分，spread[t]-spread[t-1]，對應OU模型的微分型式
+    spread_lag = spread[:-1]   #滯後的 spread，即去掉序列中的最後一個元素，使其與 delta_spread 對齊，便於後續回歸
+                               #spread[:-1]：等價於 [spread[0], spread[1], ..., spread[n-2]]
+    slope, intercept, _, _, _ = linregress(spread_lag, delta_spread)
+    #linregress：進行簡單線性回歸，用滯後價差(spread_lag)解釋價差變化(delta_spread)
+    #迴歸式:delta_spread = slope * spread_lag + intercept
+    theta = -slope
+    mu = intercept / theta
+    sigma = np.std(delta_spread - (slope * spread_lag + intercept))
+    #以殘差（實際變化值與回歸預測值之差）計算標準差，反映 spread 的隨機波動性
+    return theta, mu, sigma
+
+# 呼叫函數，估計 OU 模型參數
+theta, mu, sigma = estimate_ou_params(spread)
+
+print(f"Theta: {theta}, Mu: {mu}, Sigma: {sigma}")
+
+# 3.設置交易閾值
+def generate_signals(spread, mu, sigma, entry_threshold=1.0, exit_threshold=0.5):
+    """生成交易信號"""
+    signals = np.zeros_like(spread)
+    z_score = (spread - mu) / sigma
+    signals[z_score > entry_threshold] = -1  #  賣出信號
+    signals[z_score < -entry_threshold] = 1  # 買入信號
+    signals[np.abs(z_score) < exit_threshold] = 0  # 平倉信號
+    #signals[spread > mu + entry_threshold * sigma] = -1
+    #signals[spread < mu - entry_threshold * sigma] = 1
+    #signals[np.abs(spread - mu) < exit_threshold * sigma] = 0
+    return signals
+
+# 產生交易信號
+signals = generate_signals(spread, mu, sigma)
+print("交易信號:", signals)
+
+# 4.計算策略績效
+def backtest_strategy(spread, signals):
+    """根據交易信號回測策略績效"""
+    positions = signals[:-1]
+    pnl = -positions * np.diff(spread)  # 計算盈虧
+    cumulative_pnl = np.cumsum(pnl)  # 累計盈虧
+    return cumulative_pnl
+
+# 回測
+cumulative_pnl = backtest_strategy(spread, signals)
+
+import quantstats as qs
+qs.reports.full(ret_df2,periods_per_year=365)
+
+# 繪製績效圖
+plt.figure(figsize=(12, 6))
+plt.plot(cumulative_pnl, label='Cumulative PnL')
+plt.axhline(0, color='black', linestyle='--')
+plt.title('Pairs Trading Strategy Performance')   #視覺圖形成功
+plt.xlabel('Time')
+plt.ylabel('Cumulative Profit')
+plt.legend()
+plt.show()
+plt.close('all')  # 自動關閉所有 Matplotlib 圖表
