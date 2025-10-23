@@ -28,7 +28,7 @@ print(df.dtypes)
 df['spread'] = df['PHA_close'] / df['FET_close']
 spread = df['spread'].values  # 確保 spread 是一個陣列
 
-# 检查 NaN 和 Inf 值
+# 檢查 NaN 和 Inf 值
 print("NaN values in spread:", np.isnan(spread).sum())
 print("Inf values in spread:", np.isinf(spread).sum())
 
